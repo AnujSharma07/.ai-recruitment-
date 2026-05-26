@@ -1,58 +1,162 @@
-# Predictive Paradox: Power Grid Demand Forecasting
+# Predictive Paradox — Power Grid Demand Forecasting
 
-This document provides a comprehensive technical breakdown of the `predictive_paradox.py` script, designed for high-precision hourly electricity demand forecasting using the PGCB dataset.
+> **IITG.ai Recruitment Task** | Forecasting hourly electricity demand on the Bangladesh national grid using classical machine learning.
 
-## 1. Project Overview
-The objective of this project is to build a robust machine learning pipeline capable of predicting next-hour power demand. It integrates multi-domain data to capture the complex relationship between human activity (economics), environmental conditions (weather), and historical consumption patterns.
+---
 
-## 2. Integrated Data Architecture
-The pipeline merges three distinct data sources into a unified hourly time-series:
+## Problem Statement
 
-| Source | Category | Key Variables |
-| :--- | :--- | :--- |
-| **Grid Data** | Target & Operations | `demand_mw`, `generation_mw`, `load_shedding`, fuel types (Gas, Coal, Solar, etc.) |
-| **Weather Data** | Environmental | Temperature, Humidity, Apparent Temp, Precipitation, Cloud Cover, Wind Direction |
-| **Economic Data** | Macro Trends | GDP Growth, Population, Urbanization, Electricity Access, Inflation (CPI) |
+Accurate electricity demand forecasting is critical for grid stability.  
+**Goal:** Predict `demand_mw` at time `t+1` using only information available at time `t`.
 
-## 3. Data Cleaning & Preprocessing
-To handle real-world data noise and telemetry errors, the script implements:
-* **Hourly Reindexing:** Ensures a continuous timeline, filling small gaps (<2 hours) with forward-filling.
-* **Weather Interpolation:** Uses linear interpolation (limit of 6 hours) to maintain environmental continuity.
-* **Rolling IQR Outlier Filter:** * Calculates rolling statistics with a **72-hour window**.
-    * Flags values outside $Q1 - 4k$ or $Q3 + 4k$ (where $k=4.0$).
-    * Replaces anomalies with the rolling median to prevent model distortion from spikes.
+**Constraint:** Classical ML only — no LSTMs, Transformers, ARIMA, or Prophet.
 
-## 4. Feature Engineering
-The model's performance is driven by a high-dimensional feature set:
+---
 
-### A. Calendar & Temporal Features
-* **Cyclical Encoding:** Hour, Day, Month, and Day of Year are transformed using Sine/Cosine functions to preserve circularity (e.g., 23:00 is close to 00:00).
-* **Binary Indicators:** Identification of weekends and Fridays (specific to local grid significance).
+## Project Structure
 
-### B. Lagged & Rolling Variables
-* **Direct Lags:** Historical demand from 1, 2, 3, 6, 12, 24, 48, 168 (1 week), and 336 (2 weeks) hours prior.
-* **Rolling Statistics:** Mean, Std, Max, and Min across windows of 3, 6, 12, 24, 48, and 168 hours.
-* **Differential Features:** 1-hour and 24-hour demand changes (deltas).
+```
+PredictiveParadox/
+│
+├── predictive_paradox.ipynb   # Main notebook — full end-to-end walkthrough
+│
+├── src/
+│   ├── __init__.py            # Package exports
+│   ├── data_loader.py         # Raw data ingestion (PGCB, Weather, Economic)
+│   ├── preprocessing.py       # Cleaning, outlier removal, merging
+│   ├── feature_engineering.py # Temporal features, lags, rolling stats
+│   └── model.py               # Training, evaluation, visualisations
+│
+├── data/                      # (not committed) place datasets here
+│   ├── PGCB_date_power_demand.xlsx
+│   ├── weather_data.xlsx
+│   └── economic_full_1.csv
+│
+├── figures/                   # Auto-generated plots
+└── README.md
+```
 
-## 5. Modeling Methodology
-The script follows a strict **chronological split** to avoid data leakage:
-* **Training Data:** All observations prior to 2023.
-* **Testing Data:** The full calendar year of 2023.
+---
 
-### Algorithms
-1.  **LightGBM (Primary):** Optimized for speed and large feature spaces. 
-    * *Params:* 1000 estimators, 63 leaves, 0.04 learning rate.
-2.  **XGBoost:** Used for performance benchmarking and validation.
-    * *Params:* 800 estimators, depth 7, 0.05 learning rate.
+## Data Sources
 
-## 6. Evaluation Metrics
-The models are evaluated on the 2023 test set using:
-* **MAPE (Mean Absolute Percentage Error):** The primary indicator of accuracy.
-* **MAE (Mean Absolute Error):** Average error in Megawatts.
-* **RMSE (Root Mean Squared Error):** Penalty for large prediction errors.
+| File | Granularity | Key Columns |
+|------|-------------|-------------|
+| `PGCB_date_power_demand.xlsx` | Hourly | `demand_mw`, `generation_mw`, fuel-type breakdown |
+| `weather_data.xlsx` | Hourly | Temperature, humidity, precipitation, cloud cover |
+| `economic_full_1.csv` | Annual | GDP growth, population, electricity access (World Bank) |
 
-## 7. Results & Interpretation
-The script generates several visualizations to interpret the findings:
-* **Feature Importance:** Highlights which variables (usually Lags and Hour of Day) contribute most to the forecast.
-* **Error Distribution:** Analyzes the percentage error frequency.
-* **Hourly MAPE:** Identifies which hours of the day (e.g., peak evening hours) are the most difficult to predict.
+---
+
+## Methodology
+
+### 1. Exploratory Data Analysis
+- Visualised raw demand time series (identified severe telemetry spikes)
+- Plotted average demand by hour-of-day and month (confirmed daily and seasonal cycles)
+- Computed correlation heatmap between demand and weather variables
+
+### 2. Data Preprocessing
+
+| Problem | Solution | Rationale |
+|---------|----------|-----------|
+| Duplicate timestamps | Keep first occurrence | Grid telemetry can double-log intervals |
+| Missing hours | Hourly reindex + ffill (≤2 h) | Short telemetry dropout; longer gaps stay NaN |
+| Extreme demand spikes | Rolling IQR filter (window=72 h, k=4.0) | Conservative — flags only genuine telemetry errors, not real peak-load events |
+| Missing weather data | Linear interpolation (≤6 h) | Weather changes smoothly; longer gaps are filled with nearest valid reading |
+| Annual economic data | Broadcast by calendar year | Macro-indicators change only yearly; no sub-annual information available |
+
+**Why k=4.0?** A smaller multiplier (e.g. k=1.5) would incorrectly flag genuine extreme-heat peak days as anomalies, removing real signal the model needs to learn from.
+
+### 3. Feature Engineering
+
+Since tree-based models treat every row independently, temporal context must be injected explicitly.
+
+**A. Calendar Features (cyclical encoding)**  
+Raw integer hour/month encodes `23` and `0` as far apart; sin/cos projection fixes this:
+```
+hour_sin = sin(2π · hour / 24)
+hour_cos = cos(2π · hour / 24)
+```
+
+**B. Lag Features**  
+Historical demand at 1h, 2h, 3h, 6h, 12h, 24h, 48h, 168h (1 week), 336h (2 weeks) back.  
+The weekly lag (`lag_168h`) is particularly powerful — demand at the same time last week is a strong predictor.
+
+**C. Rolling Statistics**  
+Mean, std, max, min over windows of 3h, 6h, 12h, 24h, 48h, and 168h.  
+All rolling features use `.shift(1)` before `.rolling()` to prevent current-hour leakage.
+
+**D. Differential Features**  
+`demand_diff_1h` and `demand_diff_24h` — rate-of-change captures ramp-up/ramp-down patterns.
+
+**Total features: ~80**
+
+### 4. Train/Test Split (Strict Chronological)
+
+- **Training:** All data before 2023
+- **Test:** Full calendar year 2023 (hold-out, never touched during training)
+
+A random split is **incorrect** here — lag/rolling features computed from future rows would leak test-period information into training.
+
+### 5. Models
+
+| Model | Config | Role |
+|-------|--------|------|
+| **LightGBM** | 1000 trees, lr=0.04, 63 leaves | Primary model |
+| **XGBoost** | 800 trees, lr=0.05, depth=7 | Benchmark |
+
+No feature scaling is applied — tree-based models are invariant to monotonic transformations.
+
+---
+
+## Results
+
+| Model | MAPE (%) | MAE (MW) | RMSE (MW) |
+|-------|----------|----------|-----------|
+| LightGBM | *(see notebook output)* | — | — |
+| XGBoost  | *(see notebook output)* | — | — |
+
+**MAPE interpretation:**
+- < 3%: Publication-quality for grid forecasting
+- < 5%: Operationally useful for dispatch planning
+- < 10%: Acceptable for day-ahead scheduling
+
+---
+
+## Key Findings from Feature Importance
+
+1. **Lag features dominate** — `lag_1h`, `lag_2h`, and `lag_24h` are consistently the top three features. The most powerful predictor of next-hour demand is current-hour demand (strong short-range autocorrelation).
+
+2. **Weekly lag matters** — `lag_168h` (same hour last week) ranks in the top 10, capturing the strong weekly demand cycle.
+
+3. **Hour-of-day is the top calendar feature** — `hour_sin`/`hour_cos` reflect the clear daily peak-demand cycle seen in the EDA (~18:00–22:00).
+
+4. **Temperature** is the most important weather variable, consistent with AC-driven cooling demand during summer months.
+
+5. **Economic features** contribute modestly — they shift the long-run demand baseline but are constant within a year, so their per-hour signal is low.
+
+---
+
+## Running the Project
+
+```bash
+# 1. Install dependencies
+pip install pandas numpy scikit-learn xgboost lightgbm matplotlib seaborn openpyxl
+
+# 2. Place the three data files in ./data/
+
+# 3. Open the notebook
+jupyter notebook predictive_paradox.ipynb
+```
+
+---
+
+## Limitations
+
+- The model does not have a holiday calendar (Eid, national holidays cause sharp demand dips not captured by day-of-week features alone)
+- Load-shedding events in the training data distort the measured demand signal
+- Economic features are only available up to 2022 — 2023 test-year values are forward-filled
+
+---
+
+*IITG.ai Recruitment — Predictive Paradox | Submission by Anuj*
