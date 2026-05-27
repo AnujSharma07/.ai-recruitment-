@@ -113,8 +113,8 @@ No feature scaling is applied — tree-based models are invariant to monotonic t
 
 | Model | MAPE (%) | MAE (MW) | RMSE (MW) |
 |-------|----------|----------|-----------|
-| LightGBM | *(see notebook output)* | — | — |
-| XGBoost  | *(see notebook output)* | — | — |
+| LightGBM | 2.325% | 243.6 MW | 391.1 MW |
+| XGBoost  | 2.560% | 274.2 MW | 426.4 MW |
 
 **MAPE interpretation:**
 - < 3%: Publication-quality for grid forecasting
